@@ -1,10 +1,15 @@
 // nocanonico.c
+#include "nocanonico.h"
 
-// Estado global para poder restaurar en el handler de Ctrl-C
+#include <unistd.h>
+#include <fcntl.h>
+#include <signal.h>
+
+// Estado global para poder restaurar en el restaurador de Ctrl-C
 static struct termios g_orig_t;
 static int g_orig_flags = -1;
 
-// Handler para Ctrl-C: restaura terminal y sale
+// Restaurador para Ctrl-C: restaura terminal y sale
 static void restaurar_y_salir(int sig) {
     (void)sig;
     tcsetattr(STDIN_FILENO, TCSANOW, &g_orig_t);
@@ -14,10 +19,7 @@ static void restaurar_y_salir(int sig) {
     _exit(0);
 }
 
-// ---- Modo no canónico BLOQUEANTE (para contraseña, usa getchar()) ----
-// Devuelve 0 si OK, 1 si error.
-// Guarda la configuración original en *orig_t.
-// NO toca VMIN/VTIME, así que getchar() sigue bloqueando.
+// Modo no canónico BLOQUEANTE
 int setup_nocanonico_bloq(struct termios *orig_t) {
     struct termios t;
 
@@ -28,7 +30,7 @@ int setup_nocanonico_bloq(struct termios *orig_t) {
     if (orig_t) *orig_t = t;
     g_orig_t = t;
 
-    // No canónico y sin eco (como tenías en autenticar)
+    // No canónico y sin eco
     t.c_lflag &= ~(ECHO | ICANON);
 
     if (tcsetattr(STDIN_FILENO, TCSANOW, &t) == -1) {
@@ -41,9 +43,7 @@ int setup_nocanonico_bloq(struct termios *orig_t) {
     return 0;
 }
 
-// ---- Modo no canónico NO BLOQUEANTE (para secuencias con read() no bloqueante) ----
-// Devuelve 0 si OK, 1 si error.
-// Guarda configuración original en *orig_t y flags originales en *orig_flags.
+// Modo no canónico NO BLOQUEANTE
 int setup_nocanonico_nobloq(struct termios *orig_t, int *orig_flags) {
     struct termios t;
 
@@ -79,7 +79,6 @@ int setup_nocanonico_nobloq(struct termios *orig_t, int *orig_flags) {
 }
 
 // ---- Restaurar terminal ----
-// Si orig_flags == -1, no toca flags.
 void restaurarTerminal(const struct termios *orig_t, int orig_flags) {
     if (orig_t) {
         tcsetattr(STDIN_FILENO, TCSANOW, orig_t);
