@@ -1,12 +1,18 @@
 // secuencias.c
+#include "secuencias.h"
+#include "nocanonico.h"
 
-// Declaraciones de las funciones de nocanonico.c
-int setup_nocanonico_nobloq(struct termios *orig_t, int *orig_flags);
-void restaurarTerminal(const struct termios *orig_t, int orig_flags);
+#include <wiringPi.h>
+#include <wiringSerial.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <termios.h>
+#include <errno.h>
+#include <string.h>
 
 // Variables definidas en main.c (compartidas porque se incluye este .c allí)
-extern int serial_fd;     // descriptor UART en modo remoto
-extern int modoRemoto;   // 0 = local, 1 = remoto
+extern int serial_fd;
+extern int modoRemoto;
 
 // -------------------- Parámetros globales de control de velocidad --------------------
 const int pasoDelay      = 50;    // Paso de ajuste (ms)
@@ -14,7 +20,7 @@ const int delayMin       = 50;    // Límite inferior (más rápido)
 const int delayMax       = 2000;  // Límite superior (más lento)
 const int pasoSubDelay   = 10;    // Paso de subdelay (ms) para respuesta rápida
 
-// 🔹 Velocidades "guardadas" por secuencia (persisten entre llamadas)
+// Velocidades guardadas por secuencia (persisten entre llamadas)
 static int vel_auto      = 0;
 static int vel_choque    = 0;
 static int vel_apilada   = 0;
@@ -24,11 +30,11 @@ static int vel_danza     = 0;
 static int vel_firstinfirstoff  = 0;
 static int vel_escalera  = 0;
 
-// -------------------- Definición de LEDs --------------------
+// Definición de LEDs
 const unsigned char LEDS[8] = {23, 24, 25, 12, 16, 20, 21, 26};
 
-// -------------------- Tablas de secuencias --------------------
-// 1) "La carrera" (tabla de datos)
+// Tablas de secuencias
+// "La carrera" (tabla de datos)
 const unsigned char carrera[][8] = {
     {1,0,0,0,0,0,0,0}, {0,1,0,0,0,0,0,0}, {0,0,1,0,0,0,0,0},
     {1,0,0,1,0,0,0,0}, {0,1,0,0,1,0,0,0}, {0,0,1,0,1,0,0,0},
@@ -36,14 +42,14 @@ const unsigned char carrera[][8] = {
     {0,0,0,0,0,0,1,0}, {0,0,0,0,0,0,0,1}
 };
 
-// 2) "El choque" (tabla de datos)
+// "El choque" (tabla de datos)
 const unsigned char choque[][8] = {
     {1,0,0,0,0,0,0,1}, {0,1,0,0,0,0,1,0}, {0,0,1,0,0,1,0,0},
     {0,0,0,1,1,0,0,0}, {0,0,0,1,1,0,0,0}, {0,0,1,0,0,1,0,0},
     {0,1,0,0,0,0,1,0}, {1,0,0,0,0,0,0,1}
 };
 
-// 3) "Salto intermedio" (tabla de datos: LED de por medio)
+// "Salto intermedio" (tabla de datos: LED de por medio)
 const unsigned char danza[][8] = {
     {0,0,1,1,0,0,1,1},
     {1,1,0,0,1,1,0,0},
@@ -56,7 +62,7 @@ const unsigned char danza[][8] = {
     {0,0,1,1,0,0,1,1},
 };
 
-// 4) "Escalera central" (tabla de datos: se llena hacia el centro y vuelve)
+// "Escalera central" (tabla de datos: se llena hacia el centro y vuelve)
 const unsigned char escaleraCentral[][8] = {
     {0,0,0,0,0,0,0,0},
     {1,0,0,0,0,0,0,1},
@@ -68,12 +74,12 @@ const unsigned char escaleraCentral[][8] = {
     {1,0,0,0,0,0,0,1}
 };
 
-const int cantEstados_Carrera          = sizeof(carrera)         / sizeof(carrera[0]);
-const int cantEstados_Choque           = sizeof(choque)          / sizeof(choque[0]);
-const int cantEstados_Danza  = sizeof(danza) / sizeof(danza[0]);
+const int cantEstados_Carrera          = sizeof(carrera) / sizeof(carrera[0]);
+const int cantEstados_Choque           = sizeof(choque) / sizeof(choque[0]);
+const int cantEstados_Danza            = sizeof(danza) / sizeof(danza[0]);
 const int cantEstados_EscaleraCentral  = sizeof(escaleraCentral) / sizeof(escaleraCentral[0]);
 
-// -------------------- Funciones auxiliares --------------------
+// Funciones auxiliares
 
 static void apagarLeds(void) {
     for (int i = 0; i < 8; i++)
@@ -88,14 +94,11 @@ static void aplicarEstado(const unsigned char frame[8]) {
 // Maneja teclado o UART:
 // - LOCAL: flechas ↑/↓ ajustan delay, 'q' sale.
 // - REMOTO: flechas ↑/↓ (enviadas por el terminal) ajustan delay, 'q' sale.
-static int manejarTeclado(struct termios *orig_t,
-                          int orig_flags,
-                          int *delay_ms)
-{
+static int manejarTeclado(struct termios *orig_t, int orig_flags, int *delay_ms) {
     char c;
     ssize_t n;
 
-    // -------------------- MODO LOCAL (teclado Raspberry) --------------------
+    // MODO LOCAL
     if (!modoRemoto) {
         static unsigned int ultimoCambioTiempo = 0;
         const unsigned int intervaloTiempo = 80; // ms mínimos entre cambios grandes
@@ -120,7 +123,7 @@ static int manejarTeclado(struct termios *orig_t,
             }
 
             // Flechas ESC [ A / ESC [ B
-            if (c == 27) { // posible inicio de secuencia ESC [
+            if (c == 27) { // ESC
                 char seq[2];
                 ssize_t n1 = read(STDIN_FILENO, &seq[0], 1);
                 ssize_t n2 = read(STDIN_FILENO, &seq[1], 1);
@@ -148,9 +151,9 @@ static int manejarTeclado(struct termios *orig_t,
         return 0;
     }
 
-    // -------------------- MODO REMOTO (PC via UART) --------------------
+    // MODO REMOTO (PC via UART)
     if (serial_fd < 0)
-        return 0;  // por seguridad
+        return 0;
 
     static unsigned int ultimoCambioTiempo_Remoto = 0;
     const unsigned int intervaloTiempo_Remoto = 80;
@@ -200,24 +203,18 @@ static int manejarTeclado(struct termios *orig_t,
     return 0;
 }
 
-// Espera con subdelays (para respuesta más inmediata al teclado/UART)
-static int delayInteligente(int total_ms,
-                            struct termios *orig_t,
-                            int orig_flags,
-                            int *delay_ms)
-{
+// Espera con subdelays para respuesta inmediata al teclado
+static int delayInteligente(int total_ms, struct termios *orig_t, int orig_flags, int *delay_ms) {
     if (total_ms < pasoSubDelay)
         total_ms = pasoSubDelay;
 
-    // Para remoto: evitar spamear el UART, solo actualizar cuando cambia
+    // Para remoto: solo actualiza cuando cambia y evita spamear el UART
     int ultimaVelocidadMostrada = -1;
 
     for (int t = 0; t < total_ms; t += pasoSubDelay) {
 
-        // Muestra y actualiza la velocidad en la misma línea (terminal local)
-        // 🔹 SOLO en modo LOCAL, para no ensuciar "Ejecutando modo remoto..." en la Raspi
         if (!modoRemoto) {
-            printf("\rVelocidad secuencia: %d ms   ", *delay_ms);
+            printf("\rDelay secuencia: %d ms - Velocidad secuencia: %.2f Hz   ", *delay_ms, 1000.0 / (double)(*delay_ms));
             fflush(stdout);
         }
 
@@ -225,8 +222,7 @@ static int delayInteligente(int total_ms,
         if (modoRemoto && serial_fd >= 0) {
             if (*delay_ms != ultimaVelocidadMostrada) {
                 char msg[64];
-                snprintf(msg, sizeof(msg),
-                         "\rVelocidad secuencia: %d ms   ", *delay_ms);
+                snprintf(msg, sizeof(msg),"\rDelay secuencia: %d ms - Velocidad secuencia: %.2f Hz   ", *delay_ms, 1000.0 / (double)(*delay_ms));
                 serialPuts(serial_fd, msg);
                 ultimaVelocidadMostrada = *delay_ms;
             }
@@ -240,10 +236,8 @@ static int delayInteligente(int total_ms,
     return 0;
 }
 
-// -------------------- Núcleo genérico para tablas --------------------
-static int ejecutarSecuenciaTabla(const unsigned char seq[][8], int n_frames,
-                                  int *delayGuardado, int delayInicial)
-{
+// Ejecutar tablas de datos
+static int ejecutarSecuenciaTabla(const unsigned char seq[][8], int n_frames, int *delayGuardado, int delayInicial) {
     struct termios orig_t;
     int orig_flags;
 
@@ -302,8 +296,7 @@ int runAutoFantastico(int delayInicial) {
 
 // -------------------- Secuencia 2: El choque --------------------
 int runChoque(int delayInicial) {
-    return ejecutarSecuenciaTabla(choque, cantEstados_Choque,
-                                  &vel_choque, delayInicial);
+    return ejecutarSecuenciaTabla(choque, cantEstados_Choque, &vel_choque, delayInicial);
 }
 
 // -------------------- Secuencia 3: La apilada --------------------
@@ -369,12 +362,10 @@ int runApilada(int delayInicial) {
 
 // -------------------- Secuencia 4: La carrera --------------------
 int runCarrera(int delayInicial) {
-    return ejecutarSecuenciaTabla(carrera, cantEstados_Carrera,
-                                  &vel_carrera, delayInicial);
+    return ejecutarSecuenciaTabla(carrera, cantEstados_Carrera, &vel_carrera, delayInicial);
 }
 
-// -------------------- Secuencia 5: Binario completo (algorítmica) --------------------
-// Recorre todas las combinaciones posibles de 8 bits (00000000 → 11111111)
+// -------------------- Secuencia 5: Binario completo --------------------
 int runBinarioCompleto(int delayInicial) {
     struct termios orig_t;
     int orig_flags;
@@ -387,7 +378,7 @@ int runBinarioCompleto(int delayInicial) {
     while (1) {
         for (unsigned int val = 0; val < 256; val++) {
             for (int j = 0; j < 8; j++)
-                frame[j] = (val >> j) & 1;  // bit más significativo a la izquierda
+                frame[j] = (val >> j) & 1;
 
             aplicarEstado(frame);
 
@@ -404,15 +395,12 @@ int runBinarioCompleto(int delayInicial) {
     return 0;
 }
 
-// -------------------- Secuencia 6: Salto intermedio (tabla de datos) --------------------
+// -------------------- Secuencia 6: Salto intermedio --------------------
 int runDanza(int delayInicial) {
-    return ejecutarSecuenciaTabla(danza, cantEstados_Danza,
-                                  &vel_danza, delayInicial);
+    return ejecutarSecuenciaTabla(danza, cantEstados_Danza, &vel_danza, delayInicial);
 }
 
 // -------------------- Secuencia 7: FOFO (First On, First Off) --------------------
-// Enciende los LEDs uno por uno hasta tener los 8 encendidos,
-// luego los apaga uno por uno comenzando desde el primero encendido.
 int runFirstOnFirstOff(int delayInicial) {
     struct termios orig_t;
     int orig_flags;
@@ -422,8 +410,7 @@ int runFirstOnFirstOff(int delayInicial) {
     int delay_ms = (vel_firstinfirstoff > 0) ? vel_firstinfirstoff : delayInicial;
 
     while (1) {
-        // 🔹 Fase 1: Encendido progresivo (First On)
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 8; i++) { // Encendido progresivo
             // Enciende los LEDs desde el primero hasta el actual
             for (int j = 0; j <= i; j++)
                 digitalWrite(LEDS[j], HIGH);
@@ -437,10 +424,9 @@ int runFirstOnFirstOff(int delayInicial) {
             }
         }
 
-        delay(delay_ms); // pausa breve cuando están todos encendidos
+        delay(delay_ms);
 
-        // 🔹 Fase 2: Apagado progresivo (First Off)
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 8; i++) { // Apagado progresivo
             // Apaga los LEDs desde el primero hasta el actual
             for (int j = 0; j <= i; j++)
                 digitalWrite(LEDS[j], LOW);
@@ -461,10 +447,9 @@ int runFirstOnFirstOff(int delayInicial) {
     return 0;
 }
 
-// -------------------- Secuencia 8: Escalera central (tabla de datos) --------------------
+// -------------------- Secuencia 8: Escalera central --------------------
 int runEscaleraCentral(int delayInicial) {
-    return ejecutarSecuenciaTabla(escaleraCentral, cantEstados_EscaleraCentral,
-                                  &vel_escalera, delayInicial);
+    return ejecutarSecuenciaTabla(escaleraCentral, cantEstados_EscaleraCentral, &vel_escalera, delayInicial);
 }
 
 // -------------------- Reset de velocidades --------------------
